@@ -89,7 +89,7 @@ jobs:
           -covermode=atomic
           -coverprofile=${{ env.COVER_OUT }}
           -race
-          -tags target_all
+          -tags chaos
           -v
           ./...
 
