@@ -20,21 +20,17 @@ import "context"
 
 type engineKey struct{}
 
-var background = context.WithValue(context.Background(),
-	engineKey{}, &Engine{limit: defaultLimit})
-
-// Background is a pre-defined global, analogous to
-// [context.Background]. The [Engine] associated with the context has a
-func Background() context.Context {
-	return background
-}
-
-// Chaos may return [ErrChaos] if the build is [Enabled] and the context
-// is associated with an [Engine].
+// Chaos may return an *[Error] if the build is [Enabled] and the
+// context is associated with an [Engine].
 func Chaos(ctx context.Context) error {
 	if !Enabled() {
 		return nil
 	}
+	return chaos(ctx)
+}
+
+// chaos exists for testing.
+func chaos(ctx context.Context) error {
 	if e, ok := FromContext(ctx); ok {
 		return e.chaos(3)
 	}
@@ -42,24 +38,13 @@ func Chaos(ctx context.Context) error {
 }
 
 // FromContext returns the [Engine] associated with the given context.
-func FromContext(ctx context.Context) (*Engine, bool) {
-	if !Enabled() {
-		return nil, false
-	}
+func FromContext(ctx context.Context) (eng *Engine, ok bool) {
 	found := ctx.Value(engineKey{})
 	e, ok := found.(*Engine)
 	return e, ok
 }
 
-// WithContext returns a context that has an associated [Engine] if a
-// chaos build is [Enabled]. This function will return the argument if
-// it is already associated with an [Engine].
-func WithContext(ctx context.Context, opts ...Option) context.Context {
-	if !Enabled() {
-		return ctx
-	}
-	if _, hasEngine := FromContext(ctx); hasEngine {
-		return ctx
-	}
-	return context.WithValue(ctx, engineKey{}, New(opts...))
+// WithEngine returns a new context associated with the [Engine].
+func WithEngine(ctx context.Context, e *Engine) context.Context {
+	return context.WithValue(ctx, engineKey{}, e)
 }

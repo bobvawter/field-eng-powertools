@@ -17,49 +17,55 @@
 package generator
 
 import (
-	"fmt"
-	"go/types"
 	"os"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/tools/go/packages"
 )
 
-func Cmd() *cobra.Command {
+// Command returns the generator.
+func Command() *cobra.Command {
 	cfg := packagesConfig()
+	var dir, pkgOverride, outFile string
 	ret := &cobra.Command{
 		Use:  filepath.Base(os.Args[0]) + " < interface name > ...",
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return nil
+			absDir, err := filepath.Abs(cfg.Dir)
+			if err != nil {
+				return err
+			}
+			cfg.Dir = absDir
+
+			absOut, err := filepath.Abs(filepath.Join(absDir, outFile))
+			if err != nil {
+				return err
+			}
+
+			pkgName := pkgOverride
+			if pkgName == "" {
+				pkgName = filepath.Base(filepath.Dir(absOut))
+			}
+
+			gen, err := newGenerator(cmd.Context(), cfg, pkgName, args)
+			if err != nil {
+				return err
+			}
+
+			data, err := gen.generate()
+			if err != nil {
+				return err
+			}
+
+			return os.WriteFile(absOut, data, 0644)
 		},
 	}
-	ret.Flags().StringVarP(&cfg.Dir, "dir", "d", ".", "the source directory")
 	ret.Flags().StringArrayVarP(&cfg.BuildFlags, "build", "b", []string{"-mod=mod"},
 		"arguments to pass to the golang build tool")
-	ret.Flags().BoolVarP(&cfg.Tests, "tests", "t", false, "include test code")
+	ret.Flags().StringVarP(&dir, "dir", "d", ".", "a source directory")
+	ret.Flags().StringVarP(&outFile, "out", "o", "chaos_gen.go",
+		"the name of the generated file")
+	ret.Flags().StringVarP(&pkgOverride, "package", "p", "",
+		"override the generated package name")
 	return ret
-}
-
-// findType locates a named type within the package and unwraps it until
-// the desired return type is found.
-func findType[T types.Type](scope *types.Scope, name string) (T, error) {
-	found := scope.Lookup(name)
-	if found == nil {
-		return *new(T), fmt.Errorf("unknown type %s in %s", name, scope.String())
-	}
-	for typ := found.Type(); typ != nil; typ = typ.Underlying() {
-		ret, ok := typ.(T)
-		if ok {
-			return ret, nil
-		}
-	}
-	return *new(T), fmt.Errorf("type %s: expecting %T, was %T", name, *new(T), found)
-}
-
-func packagesConfig() *packages.Config {
-	return &packages.Config{
-		Mode: packages.NeedDeps | packages.NeedName | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedImports,
-	}
 }

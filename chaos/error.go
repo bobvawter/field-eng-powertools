@@ -14,8 +14,26 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build chaos_enabled
-
 package chaos
 
-const enabled = true
+import "errors"
+
+// ErrChaos can be used with [errors.Is] to detect errors returned by
+// this package.
+var ErrChaos = errors.New("chaos")
+
+// Error is returned by [Chaos] and [Engine.Chaos].
+type Error struct {
+	// The call stack which resulted in the error. This can be passed to
+	// [runtime.CallersFrames] for further inspection.
+	Stack []uintptr
+}
+
+// Error implements error.
+func (e *Error) Error() string { return "chaos" }
+
+// Is returns true if the argument is [ErrChaos].
+func (e *Error) Is(err error) bool { return err == ErrChaos }
+
+// Unwrap returns [ErrChaos].
+func (e *Error) Unwrap() error { return ErrChaos }

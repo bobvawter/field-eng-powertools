@@ -17,20 +17,19 @@
 package chaos
 
 import (
-	"errors"
 	"runtime"
 	"sync"
 	"sync/atomic"
 )
 
-const defaultLimit = 1
+const (
+	defaultLimit = 1
+	defaultSkip  = 0
+)
 
 // StackDepth contains the maximum number of call stack entries that
 // will be used to determine uniqueness.
 const StackDepth = 25
-
-// ErrChaos is returned by [Engine.Chaos].
-var ErrChaos = errors.New("chaos")
 
 type key [StackDepth]uintptr
 type entry struct {
@@ -38,24 +37,24 @@ type entry struct {
 	done  atomic.Bool
 }
 
-// An Engine will return [ErrChaos] a set number of times for each
-// unique call stack.
+// An Engine tracks unique call stacks.
 type Engine struct {
 	entries sync.Map // Use-case 1: A cache that only grows.
-	limit   int32
-	onChaos func()
+	limit   int32    // Return this many chaos errors.
+	skip    int32    // Number of chaos calls that won't return an error.
+	onChaos Callback // User-defined behavior.
 }
 
-// New returns a new Engine, regardless of the value of [Enabled].
+// New constructs a new Engine with the provided options.
 func New(opts ...Option) *Engine {
-	ret := &Engine{limit: defaultLimit}
+	ret := &Engine{limit: defaultLimit, skip: defaultSkip}
 	for _, opt := range opts {
 		opt.option(ret)
 	}
 	return ret
 }
 
-// Chaos will return [ErrChaos] a configured number of times for each
+// Chaos will return an *[Error] a configured number of times for each
 // unique call stack that invokes the Chaos method. The number of frames
 // considered for uniqueness is set by [StackDepth].
 func (e *Engine) Chaos() error {
@@ -65,11 +64,13 @@ func (e *Engine) Chaos() error {
 // This is also called from the top-level [Chaos] function.
 func (e *Engine) chaos(callers int) error {
 	var stack key
-	runtime.Callers(callers, stack[:])
+	frames := runtime.Callers(callers, stack[:])
 
 	found, ok := e.entries.Load(stack)
 	if !ok {
-		found, _ = e.entries.LoadOrStore(stack, &entry{})
+		proposed := &entry{}
+		proposed.count.Add(-e.skip)
+		found, _ = e.entries.LoadOrStore(stack, proposed)
 	}
 
 	counter := found.(*entry)
@@ -78,15 +79,21 @@ func (e *Engine) chaos(callers int) error {
 	if counter.done.Load() {
 		return nil
 	}
-	// It's possible that the counter could over-shoot slightly if
-	// multiple callers hit this line concurrently.
-	if counter.count.Add(1) > e.limit {
+	next := counter.count.Add(1)
+	if next <= 0 {
+		// Check for skipping.
+		return nil
+	}
+	if next > e.limit {
+		// It's possible that the counter could over-shoot slightly if
+		// multiple callers hit Add() call concurrently.
 		counter.done.Store(true)
 		return nil
 	}
+	err := &Error{Stack: stack[:frames]}
 	// Invoke user callback, if defined.
 	if fn := e.onChaos; fn != nil {
-		fn()
+		return fn(err)
 	}
-	return ErrChaos
+	return err
 }

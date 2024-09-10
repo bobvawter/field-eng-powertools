@@ -15,13 +15,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package chaos improves test coverage by deterministically injecting
-// errors into callstacks.
+// errors based on unique call stacks.
 //
-// The behavior in this package is guarded by a "chaos" build tag. This
-// ensures that production builds cannot be negatively impacted.
+// The behavior in this package is guarded by a build tag. This ensures
+// that production builds cannot be negatively impacted. See [Enabled].
 package chaos
 
-// Enabled returns true if the chaos build tag was set.
+// Enabled returns true if the "chaos_enabled" build tag was set or if
+// the "chaos_env" build tag was set and a "CHAOS_ENABLED" environment
+// variable is defined.
 func Enabled() bool {
 	return enabled
 }

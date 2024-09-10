@@ -16,9 +16,22 @@
 
 package chaos
 
-// An Option may be passed to [New] or [WithContext] to configure an
-// [Engine].
+// An Option may be passed to [New] to configure an [Engine].
 type Option interface{ option(e *Engine) }
+
+// A Callback to be invoked if an [Error] is about to be returned to a
+// caller. The callback may choose to decorate or elide the error. The
+// function should be safe to call concurrently.
+type Callback func(err *Error) (replacement error)
+
+type optCallback Callback
+
+func (o optCallback) option(e *Engine) { e.onChaos = Callback(o) }
+
+// WithCallback sets a function that will be invoked if an [Error] is
+// about to be returned to a caller. The function should be safe to call
+// concurrently.
+func WithCallback(fn Callback) Option { return optCallback(fn) }
 
 type optLimit int
 
@@ -28,11 +41,10 @@ func (o optLimit) option(e *Engine) { e.limit = int32(o) }
 // stack can receive [ErrChaos]. The default limit is 1.
 func WithLimit(limit int) Option { return optLimit(limit) }
 
-type optCallback func()
+type optSkip int
 
-func (o optCallback) option(e *Engine) { e.onChaos = o }
+func (o optSkip) option(e *Engine) { e.skip = int32(o) }
 
-// WithCallback sets a function that will be invoked if [ErrChaos] is
-// about to be returned to a caller. The function should be safe to call
-// concurrently.
-func WithCallback(fn func()) Option { return optCallback(fn) }
+// WithSkip allows a call stack to succeed this many times before chaos
+// errors will be returned. The default skip is 0.
+func WithSkip(skip int) Option { return optSkip(skip) }

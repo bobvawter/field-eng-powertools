@@ -17,15 +17,20 @@
 package generator
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
 	"fmt"
+	"go/format"
 	"go/types"
+	"os"
 	"strings"
 	"text/template"
 
 	"golang.org/x/tools/go/packages"
 )
+
+const chaosPackageName = "github.com/cockroachdb/field-eng-powertools/chaos"
 
 //go:embed intf.tmpl
 var templateSource string
@@ -36,73 +41,24 @@ var intfTemplate = template.Must(template.New("").Funcs(template.FuncMap{
 	"sub": func(a, b int) int { return a - b },
 }).Parse(templateSource))
 
-type Package struct {
-	// A distinct short name like "chaos0".
-	Short string
-	// Set to true when the import name matches the package name.
-	Simple bool
-	// The fully-qualified package name used for imports.
-	Path string
-}
+// universe contains ambient symbols, like "int" and "error".
+var universe = &goPackage{}
 
-// universe represents ambbient symbols.
-var universe = &Package{}
-
-type Method struct {
-	Args         []*Param // Input arguments.
-	HasContext   bool     // Enable call to Chaos(ctx)
-	ReturnsError bool     // Enable call to Engine.Chaos()
-	Name         string   // Name as it appears in the source code.
-	Rets         []*Param // Return types.
-}
-
-type Param struct {
-	Name string
-	Type *TypeName
-}
-
-// A Target is the interface proxy type being generated.
-type Target struct {
-	Delegate *TypeName // The interface type to be wrapped.
-	Methods  []*Method // The methods in the interface.
-	Impl     *TypeName // The type being generated.
-}
-
-type TypeName struct {
-	Package     *Package // The package which defines the type.
-	Prefix      string   // Handles pointers and slices
-	Name        string   // The type's name within the package.
-	Unqualified bool     // The type is declared within the destination package.
-}
-
-// Returns the local import name for the type.
-func (t *TypeName) String() string {
-	name := t.Prefix
-	if t.Unqualified || t.Package.Short == "" {
-		name += t.Name
-	} else {
-		name += t.Package.Short + "." + t.Name
-	}
-	return name
-}
-
-type Template struct {
-	Chaos   *Package            // A reference to the chaos impl package.
-	Cmd     string              // How to invoke the generator again.
-	Imports map[string]*Package // Prevent collisions in short import names.
-	Package *Package            // The enclosing package for the generated type.
-	Targets []*Target           // The type(s) being generated.
+type generator struct {
+	Chaos   *goPackage            // A reference to the chaos impl package.
+	Cmd     string                // How to invoke the generator again.
+	Imports map[string]*goPackage // Prevent collisions in short import names.
+	Package *goPackage            // The enclosing package for the generated type.
+	Targets []*target             // The type(s) being generated.
 
 	ctxTypes map[*types.Interface]struct{} // The context.Context type.
 	errType  *types.Interface              // The built-in "error" type.
 
-	packages map[*types.Package]*Package // Memoize template package values.
-	types    map[types.Type]*TypeName    // Memoize type data.
+	packages map[*types.Package]*goPackage // Memoize template package values.
+	types    map[types.Type]*typeName      // Memoize type data.
 }
 
-const chaosPackageName = "github.com/cockroachdb/field-eng-powertools/chaos"
-
-func NewTemplate(ctx context.Context, cfg *packages.Config, destPkgName string, intfNames []string) (*Template, error) {
+func newGenerator(ctx context.Context, cfg *packages.Config, destPkgName string, intfNames []string) (*generator, error) {
 	request := map[string][]string{
 		chaosPackageName: nil,
 	}
@@ -118,27 +74,26 @@ func NewTemplate(ctx context.Context, cfg *packages.Config, destPkgName string, 
 		request[pkgName] = append(request[pkgName], intfName[dotIdx+1:])
 	}
 
-	chaosPackage := &Package{
-		Short:  "chaos",
+	chaosPackage := &goPackage{
+		Import: "chaos",
 		Simple: true,
 		Path:   chaosPackageName,
 	}
-	ret := &Template{
+	ret := &generator{
 		Chaos: chaosPackage,
 		Cmd:   "xyzzy",
-		Package: &Package{
-			Short:  destPkgName,
+		Package: &goPackage{
+			Import: destPkgName,
 			Simple: true,
-			Path:   "",
 		},
-		Targets: make([]*Target, 0, len(intfNames)),
+		Targets: make([]*target, 0, len(intfNames)),
 
 		ctxTypes: map[*types.Interface]struct{}{},
-		packages: map[*types.Package]*Package{},
-		Imports: map[string]*Package{
-			chaosPackage.Short: chaosPackage,
+		packages: map[*types.Package]*goPackage{},
+		Imports: map[string]*goPackage{
+			chaosPackage.Import: chaosPackage,
 		},
-		types: map[types.Type]*TypeName{},
+		types: map[types.Type]*typeName{},
 	}
 
 	var toGenerate []*types.Named
@@ -180,18 +135,19 @@ func NewTemplate(ctx context.Context, cfg *packages.Config, destPkgName string, 
 		if !ok {
 			return nil, fmt.Errorf("%s is not an interface type", namedType.Obj().Id())
 		}
+		implName := "chaotic" + namedType.Obj().Name() + "Impl"
 
-		target := &Target{
+		target := &target{
 			Delegate: ret.typeNameFor(namedType),
-			Impl: &TypeName{
-				Name:        "chaotic" + namedType.Obj().Name() + "Impl",
-				Package:     ret.Package,
-				Unqualified: true,
+			Impl: &typeName{
+				Short:     implName,
+				Qualified: implName,
 			},
 		}
 
 		for i := range tgtIntf.NumMethods() {
-			target.Methods = append(target.Methods, ret.methodFor(tgtIntf.Method(i)))
+			method := tgtIntf.Method(i)
+			target.Methods = append(target.Methods, ret.methodFor(method))
 		}
 
 		ret.Targets = append(ret.Targets, target)
@@ -200,26 +156,27 @@ func NewTemplate(ctx context.Context, cfg *packages.Config, destPkgName string, 
 	return ret, nil
 }
 
-func (t *Template) methodFor(m *types.Func) *Method {
-	sig := m.Signature()
-	return &Method{
-		Args:         t.tupleFor(sig.Params()),
-		HasContext:   t.hasContext(sig),
-		Name:         m.Name(),
-		Rets:         t.tupleFor(sig.Results()),
-		ReturnsError: t.returnsError(sig),
+func (g *generator) generate() ([]byte, error) {
+	var buf bytes.Buffer
+	if err := intfTemplate.Execute(&buf, g); err != nil {
+		return nil, err
 	}
+	out, err := format.Source(buf.Bytes())
+	if err != nil {
+		_, _ = buf.WriteTo(os.Stdout)
+	}
+	return out, err
 }
 
 // hasContext returns true if the method accepts a context as the first
 // argument.
-func (t *Template) hasContext(sig *types.Signature) bool {
+func (g *generator) hasContext(sig *types.Signature) bool {
 	params := sig.Params()
 	if params.Len() == 0 {
 		return false
 	}
 	first := params.At(0).Type()
-	for ctxType := range t.ctxTypes {
+	for ctxType := range g.ctxTypes {
 		if types.Implements(first, ctxType) {
 			return true
 		}
@@ -227,98 +184,106 @@ func (t *Template) hasContext(sig *types.Signature) bool {
 	return false
 }
 
-// returnsError returns true if the method returns error as the last
-// return type.
-func (t *Template) returnsError(sig *types.Signature) bool {
-	res := sig.Results()
-	if res.Len() == 0 {
-		return false
+func (g *generator) methodFor(m *types.Func) *method {
+	sig := m.Signature()
+	return &method{
+		Args:         g.tupleFor(sig.Params()),
+		HasContext:   g.hasContext(sig),
+		Name:         m.Name(),
+		Rets:         g.tupleFor(sig.Results()),
+		ReturnsError: g.returnsError(sig),
 	}
-	last := res.At(res.Len() - 1).Type()
-	// The last return type must be exactly "error".
-	return types.AssignableTo(t.errType, last) && types.AssignableTo(last, t.errType)
 }
 
-func (t *Template) packageFor(pkg *types.Package) *Package {
-	if found, ok := t.packages[pkg]; ok {
+func (g *generator) packageFor(pkg *types.Package) *goPackage {
+	if found, ok := g.packages[pkg]; ok {
 		return found
 	}
 	// We'll see this for "error" and other builtin types.
 	if pkg == nil {
 		return universe
 	}
-	ret := &Package{
-		Short:  pkg.Name(),
+	ret := &goPackage{
+		Import: pkg.Name(),
 		Simple: true,
 		Path:   pkg.Path(),
 	}
 	// Ensure short names are unique.
 	for i := 1; true; i++ {
-		if _, collision := t.Imports[ret.Short]; !collision {
-			t.Imports[ret.Short] = ret
+		if _, collision := g.Imports[ret.Import]; !collision {
+			g.Imports[ret.Import] = ret
 			break
 		}
-		ret.Short = fmt.Sprintf("%s%d", pkg.Name(), i)
+		ret.Import = fmt.Sprintf("%s%d", pkg.Name(), i)
 		ret.Simple = false
 	}
-	t.packages[pkg] = ret
+	g.packages[pkg] = ret
 	return ret
 }
 
-func (t *Template) tupleFor(tup *types.Tuple) []*Param {
-	ret := make([]*Param, tup.Len())
+// returnsError returns true if the method returns error as the last
+// return type.
+func (g *generator) returnsError(sig *types.Signature) bool {
+	res := sig.Results()
+	if res.Len() == 0 {
+		return false
+	}
+	last := res.At(res.Len() - 1).Type()
+	// The last return type must be exactly "error".
+	return types.AssignableTo(g.errType, last) && types.AssignableTo(last, g.errType)
+}
+
+func (g *generator) tupleFor(tup *types.Tuple) []*param {
+	ret := make([]*param, tup.Len())
 	for i := range ret {
-		ret[i] = &Param{
+		ret[i] = &param{
 			Name: tup.At(i).Name(),
-			Type: t.typeNameFor(tup.At(i).Type()),
+			Type: g.typeNameFor(tup.At(i).Type()),
 		}
 	}
 	return ret
 }
 
-func (t *Template) typeNameFor(typ types.Type) *TypeName {
-	if found, ok := t.types[typ]; ok {
+func (g *generator) typeNameFor(typ types.Type) *typeName {
+	if found, ok := g.types[typ]; ok {
 		return found
 	}
+	// A fully-qualified representation: []*foo.Bar
+	qName := types.TypeString(typ, func(p *types.Package) string {
+		found := g.packageFor(p)
+		return found.Import
+	})
 
-	var ret *TypeName
-outer:
-	for try := typ; try != nil; try = try.Underlying() {
-		var prefix string
-		switch k := try.(type) {
-		case *types.Pointer:
-			try = k.Elem()
-			prefix += "*"
+	// The short name of a named type: "Bar"
+	var sName string
+	if named, ok := typ.(*types.Named); ok {
+		sName = named.Obj().Name()
+	}
 
-		case *types.Slice:
-			try = k.Elem()
-			prefix += "[]"
-		}
+	return &typeName{
+		Qualified: qName,
+		Short:     sName,
+	}
+}
 
-		switch k := try.(type) {
-		case *types.Named:
-			obj := k.Obj()
-			pkg := t.packageFor(obj.Pkg())
-			ret = &TypeName{
-				Name:        obj.Name(),
-				Package:     pkg,
-				Prefix:      prefix,
-				Unqualified: pkg == t.Package,
-			}
-			break outer
-
-		case *types.Basic:
-			ret = &TypeName{
-				Name:        prefix + k.Name(),
-				Package:     universe,
-				Unqualified: true,
-			}
-			break outer
+// findType locates a named type within the package and unwraps it until
+// the desired return type is found.
+func findType[T types.Type](scope *types.Scope, name string) (T, error) {
+	found := scope.Lookup(name)
+	if found == nil {
+		return *new(T), fmt.Errorf("unknown type %s in %s", name, scope.String())
+	}
+	for typ := found.Type(); typ != nil; typ = typ.Underlying() {
+		ret, ok := typ.(T)
+		if ok {
+			return ret, nil
 		}
 	}
-	if ret == nil {
-		panic(fmt.Errorf("unimplemented: %T", typ))
+	return *new(T), fmt.Errorf("type %s: expecting %T, was %T", name, *new(T), found)
+}
+
+func packagesConfig() *packages.Config {
+	return &packages.Config{
+		Mode: packages.NeedTypes,
 	}
-	t.types[typ] = ret
-	return ret
 }

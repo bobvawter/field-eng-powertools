@@ -18,6 +18,8 @@ package chaos
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -30,6 +32,7 @@ import (
 
 func TestEngine(t *testing.T) {
 	const expected = 1024
+
 	r := require.New(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -37,8 +40,13 @@ func TestEngine(t *testing.T) {
 	var count atomic.Int32
 	e := New(
 		WithLimit(expected),
-		WithCallback(func() {
+		WithCallback(func(err *Error) error {
 			count.Add(1)
+
+			r.ErrorIs(err, ErrChaos)
+			r.NotEmpty(err.Stack)
+
+			return fmt.Errorf("callback: %w", err)
 		}))
 
 	var errorsSeen atomic.Int32
@@ -48,6 +56,8 @@ func TestEngine(t *testing.T) {
 		eg.Go(func() error {
 			err := callChaos(e)
 			if err != nil {
+				// Ensure callback wiring.
+				r.ErrorContains(err, "callback")
 				r.ErrorIs(err, ErrChaos)
 				errorsSeen.Add(1)
 			} else {
@@ -75,6 +85,31 @@ func TestEngine(t *testing.T) {
 		return true
 	})
 	r.Equal(2, entryCount)
+}
+
+// An [Engine] may also be used directly, without context plumbing.
+func Example_engine() {
+	eng := New()
+	err := eng.Chaos()
+	fmt.Printf("%v\n", err != nil)
+
+	// Output:
+	// true
+}
+
+// A [Callback] may be attached to an [Engine] to observe or otherwise
+// manipulate the [Error] before it is returned.
+func ExampleCallback() {
+	eng := New(WithCallback(func(err *Error) (replacement error) {
+		return fmt.Errorf("callback: %w", err)
+	}))
+	err := eng.Chaos()
+	fmt.Printf("ErrChaos: %v\n", errors.Is(err, ErrChaos))
+	fmt.Println(err.Error())
+
+	// Output:
+	// ErrChaos: true
+	// callback: chaos
 }
 
 // callChaos ensures that we have a stably-named call site for ensuring

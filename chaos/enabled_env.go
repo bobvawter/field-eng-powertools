@@ -14,8 +14,10 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build chaos_enabled
+//go:build chaos_env
 
 package chaos
 
-const enabled = true
+import "os"
+
+var enabled = os.Getenv("CHAOS_ENABLED") != ""

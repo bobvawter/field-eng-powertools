@@ -17,14 +17,12 @@
 package generator
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"go/format"
-	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/tools/go/packages"
 )
 
 func TestTemplate(t *testing.T) {
@@ -32,21 +30,33 @@ func TestTemplate(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	testdata, err := filepath.Abs("./testdata")
+	r.NoError(err)
+
 	cfg := packagesConfig()
-	cfg.Dir = "./testdata"
-	temp, err := NewTemplate(ctx, cfg, "foobar", []string{"MyInterface", "io.Reader", "database/sql/driver.Conn"})
+	cfg.Dir = testdata
+	gen, err := newGenerator(ctx, cfg, "foobar", []string{
+		"MyInterface",         // Test method patterns.
+		"net.Conn",            // Verify arbitrary interfaces.
+		"io.ReadCloser",       // Verify composite interfaces.
+		"math/rand/v2.Source", // Verify versioned import.
+	})
 	r.NoError(err)
 
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", " ")
-	r.NoError(enc.Encode(temp))
+	out, err := gen.generate()
+	r.NoError(err)
 
-	var buf bytes.Buffer
-	r.NoError(intfTemplate.Execute(&buf, temp))
-	out, err := format.Source(buf.Bytes())
-	if err != nil {
-		t.Log(buf.String())
+	// Perform a complete analysis of the generated file. This will
+	// verify that the generated file would be accepted by the compiler.
+	testConfig := &packages.Config{
+		Dir:  testdata,
+		Mode: packages.NeedSyntax | packages.NeedTypes,
+		Overlay: map[string][]byte{
+			filepath.Join(testdata, "foobar", "foobar.go"): out,
+		},
 	}
+	reloaded, err := packages.Load(testConfig, "foobar/foobar.go")
 	r.NoError(err)
-	t.Log(string(out))
+	r.Empty(reloaded[0].Errors)
+	r.Empty(reloaded[0].TypeErrors)
 }

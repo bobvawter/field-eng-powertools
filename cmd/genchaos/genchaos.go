@@ -14,8 +14,23 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build chaos_enabled
+package main
 
-package chaos
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/signal"
 
-const enabled = true
+	"github.com/cockroachdb/field-eng-powertools/chaos/generator"
+)
+
+func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+	if err := generator.Command().ExecuteContext(ctx); err != nil {
+		fmt.Printf("%v\n", err)
+		os.Exit(1)
+	}
+	os.Exit(0)
+}

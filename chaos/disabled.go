@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !chaos
+//go:build !chaos_enabled && !chaos_env
 
 package chaos
 

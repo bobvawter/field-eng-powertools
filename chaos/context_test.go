@@ -18,6 +18,7 @@ package chaos
 
 import (
 	"context"
+	"fmt"
 	"runtime"
 	"strings"
 	"testing"
@@ -29,26 +30,23 @@ import (
 func TestContext(t *testing.T) {
 	r := require.New(t)
 
-	r.True(Enabled(), "chaos build not enabled")
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	// No-op for undecorated contexts.
 	r.Nil(Chaos(ctx))
 
-	chaotic := WithContext(ctx)
-
-	// Once there is a chaos context, subsequent calls to WithContext
-	// should be a no-op.
-	mid := context.WithValue(chaotic, "foo", "bar")
-	r.Same(mid, WithContext(mid))
+	chaotic := WithEngine(ctx, New())
 
 	// Validate default limit behavior.
+	var stack []uintptr
 	for i := range defaultLimit + 1 {
-		err := Chaos(chaotic)
+		err := chaos(chaotic)
 		if i < defaultLimit {
 			r.ErrorIs(err, ErrChaos)
+			var impl *Error
+			r.ErrorAs(err, &impl)
+			stack = impl.Stack
 		} else {
 			r.NoError(err)
 		}
@@ -58,16 +56,55 @@ func TestContext(t *testing.T) {
 	e, ok := FromContext(chaotic)
 	r.True(ok)
 	r.NotNil(e)
-	e.entries.Range(func(k, _ any) bool {
-		callers := k.(key)
-		frames := runtime.CallersFrames(callers[:])
-		top, _ := frames.Next()
-		r.Truef(strings.HasSuffix(top.Function, "TestContext"), "%s", top.Function)
-		return true
-	})
 
-	r.Same(Background(), WithContext(Background()))
-	backgroundEngine, ok := FromContext(Background())
-	r.True(ok)
-	r.Equal(int32(defaultLimit), backgroundEngine.limit)
+	frames := runtime.CallersFrames(stack)
+	top, _ := frames.Next()
+	r.Truef(strings.HasSuffix(top.Function, "TestContext"), "%s", top.Function)
+}
+
+// An [Engine] may be associated with a Context, which means that chaos
+// can be added to existing code by replacing the "return nil" case with
+// "return Chaos(ctx)".
+func Example_context() {
+	// This function returns a constant value based on build tags.
+	if Enabled() {
+		fmt.Println("chaos enabled")
+	}
+
+	// This demonstrates that the Engine looks at the call stack and not
+	// just an individual call site.
+	doStuff := func(ctx context.Context) error {
+		// This Chaos call will be a no-op if Enabled() returns false.
+		return Chaos(ctx)
+	}
+
+	eng := New(
+		WithLimit(2), // Emit 2 errors per unique stack trace.
+		WithSkip(1),  // Don't emit errors the first time a call is made.
+	)
+
+	ctx := WithEngine(context.Background(), eng)
+	for range 4 {
+		err := doStuff(ctx)
+		fmt.Printf("call1: %v\n", err != nil)
+	}
+	fmt.Println()
+	for range 4 {
+		// This call to Chaos has a different stack, so it will generate
+		// different results.
+		err := doStuff(ctx)
+		fmt.Printf("call2: %v\n", err != nil)
+	}
+
+	// Output:
+	// chaos enabled
+	// call1: false
+	// call1: true
+	// call1: true
+	// call1: false
+	//
+	// call2: false
+	// call2: true
+	// call2: true
+	// call2: false
 }
