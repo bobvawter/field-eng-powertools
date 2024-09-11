@@ -60,7 +60,7 @@ func Command() *cobra.Command {
 			return os.WriteFile(absOut, data, 0644)
 		},
 	}
-	ret.Flags().StringArrayVarP(&cfg.BuildFlags, "build", "b", []string{"-mod=mod"},
+	ret.Flags().StringArrayVarP(&cfg.BuildFlags, "build", "b", nil,
 		"arguments to pass to the golang build tool")
 	ret.Flags().StringVarP(&dir, "dir", "d", ".", "a source directory")
 	ret.Flags().StringVarP(&outFile, "out", "o", "chaos_gen.go",

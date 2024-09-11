@@ -54,11 +54,13 @@ type generator struct {
 	ctxTypes map[*types.Interface]struct{} // The context.Context type.
 	errType  *types.Interface              // The built-in "error" type.
 
-	packages map[*types.Package]*goPackage // Memoize template package values.
-	types    map[types.Type]*typeName      // Memoize type data.
+	packages map[string]*goPackage    // Memoize template package values by path.
+	types    map[types.Type]*typeName // Memoize type data.
 }
 
 func newGenerator(ctx context.Context, cfg *packages.Config, destPkgName string, intfNames []string) (*generator, error) {
+	cfg.Context = ctx
+
 	request := map[string][]string{
 		chaosPackageName: nil,
 	}
@@ -80,25 +82,28 @@ func newGenerator(ctx context.Context, cfg *packages.Config, destPkgName string,
 		Path:   chaosPackageName,
 	}
 	ret := &generator{
-		Chaos: chaosPackage,
-		Cmd:   "xyzzy",
-		Package: &goPackage{
-			Import: destPkgName,
-			Simple: true,
-		},
+		Chaos:   chaosPackage,
+		Cmd:     "xyzzy",
 		Targets: make([]*target, 0, len(intfNames)),
 
 		ctxTypes: map[*types.Interface]struct{}{},
-		packages: map[*types.Package]*goPackage{},
+		packages: map[string]*goPackage{},
 		Imports: map[string]*goPackage{
 			chaosPackage.Import: chaosPackage,
 		},
 		types: map[types.Type]*typeName{},
 	}
 
-	var toGenerate []*types.Named
+	destPkg, err := packages.Load(&packages.Config{
+		Dir:  cfg.Dir,
+		Mode: packages.NeedName | packages.NeedTypes,
+	}, destPkgName)
+	if err != nil {
+		return nil, err
+	}
+	ret.Package = ret.packageFor(destPkg[0].Types)
 
-	cfg.Context = ctx
+	var toGenerate []*types.Named
 	for pkgName, intfNames := range request {
 		pkgs, err := packages.Load(cfg, pkgName)
 		if err != nil {
@@ -124,7 +129,6 @@ func newGenerator(ctx context.Context, cfg *packages.Config, destPkgName string,
 	}
 
 	// Universe contains ambient types.
-	var err error
 	ret.errType, err = findType[*types.Interface](types.Universe, "error")
 	if err != nil {
 		return nil, err
@@ -185,7 +189,7 @@ func (g *generator) hasContext(sig *types.Signature) bool {
 }
 
 func (g *generator) methodFor(m *types.Func) *method {
-	sig := m.Signature()
+	sig := m.Type().(*types.Signature)
 	return &method{
 		Args:         g.tupleFor(sig.Params()),
 		HasContext:   g.hasContext(sig),
@@ -196,7 +200,7 @@ func (g *generator) methodFor(m *types.Func) *method {
 }
 
 func (g *generator) packageFor(pkg *types.Package) *goPackage {
-	if found, ok := g.packages[pkg]; ok {
+	if found, ok := g.packages[pkg.Path()]; ok {
 		return found
 	}
 	// We'll see this for "error" and other builtin types.
@@ -217,7 +221,7 @@ func (g *generator) packageFor(pkg *types.Package) *goPackage {
 		ret.Import = fmt.Sprintf("%s%d", pkg.Name(), i)
 		ret.Simple = false
 	}
-	g.packages[pkg] = ret
+	g.packages[pkg.Path()] = ret
 	return ret
 }
 
@@ -250,6 +254,10 @@ func (g *generator) typeNameFor(typ types.Type) *typeName {
 	}
 	// A fully-qualified representation: []*foo.Bar
 	qName := types.TypeString(typ, func(p *types.Package) string {
+		// Don't import types in the destination package.
+		if p.Path() == g.Package.Path {
+			return ""
+		}
 		found := g.packageFor(p)
 		return found.Import
 	})
@@ -284,6 +292,6 @@ func findType[T types.Type](scope *types.Scope, name string) (T, error) {
 
 func packagesConfig() *packages.Config {
 	return &packages.Config{
-		Mode: packages.NeedTypes,
+		Mode: packages.NeedImports | packages.NeedTypes,
 	}
 }

@@ -35,7 +35,7 @@ func TestTemplate(t *testing.T) {
 
 	cfg := packagesConfig()
 	cfg.Dir = testdata
-	gen, err := newGenerator(ctx, cfg, "foobar", []string{
+	gen, err := newGenerator(ctx, cfg, ".", []string{
 		"MyInterface",         // Test method patterns.
 		"net.Conn",            // Verify arbitrary interfaces.
 		"io.ReadCloser",       // Verify composite interfaces.
@@ -45,6 +45,7 @@ func TestTemplate(t *testing.T) {
 
 	out, err := gen.generate()
 	r.NoError(err)
+	t.Log(string(out))
 
 	// Perform a complete analysis of the generated file. This will
 	// verify that the generated file would be accepted by the compiler.
@@ -52,10 +53,10 @@ func TestTemplate(t *testing.T) {
 		Dir:  testdata,
 		Mode: packages.NeedSyntax | packages.NeedTypes,
 		Overlay: map[string][]byte{
-			filepath.Join(testdata, "foobar", "foobar.go"): out,
+			filepath.Join(testdata, "chaos_gen.go"): out,
 		},
 	}
-	reloaded, err := packages.Load(testConfig, "foobar/foobar.go")
+	reloaded, err := packages.Load(testConfig, "chaos_gen.go")
 	r.NoError(err)
 	r.Empty(reloaded[0].Errors)
 	r.Empty(reloaded[0].TypeErrors)
